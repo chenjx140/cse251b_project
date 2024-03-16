@@ -28,12 +28,16 @@ def get_args():
     parser.add_argument("--proxy_lr",type=float,default=1e-5)
     parser.add_argument("--proxy_max_len",type=int,default=128)
     parser.add_argument("--proxy_poison_rate_inverse",type=int,default=100)
+    parser.add_argument("--training_method",type=str,default="base")
+    parser.add_argument("--adv_lr",type=float,default=1e-5)
+    parser.add_argument("--adv_steps",type=int,default=5)
     parser.add_argument("--dataset",type=str,default="imdb")
     parser.add_argument("--epoch",type=int,default=4)
     parser.add_argument("--lr",type=float,default=1e-5)
     parser.add_argument("--batch_size",type=int,default=16)
     parser.add_argument("--max_len",type=int,default=256)
     parser.add_argument("--l2",type=float,default=1e-5)
+    parser.add_argument("--re_init_layers",type=int,default=0)
     return parser.parse_args()
 
 
@@ -204,6 +208,60 @@ def label_flip_rate(model:nn.Module,data_loader,target_label,trigger_words,req_t
     return flip_cnt/total_cnt
 
 
+def delta_update(adv_learning_rate, delta: torch.Tensor, delta_grad: torch.Tensor) -> torch.Tensor:
+    denorm = torch.norm(delta_grad.view(
+        delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
+    denorm = torch.clamp(denorm, min=1e-8)
+    delta = (delta + adv_learning_rate * delta_grad / denorm).detach()
+    return delta
+
+
+def train_batch(model, input_dict, b_y, loss_func, optimizer, print_loss=False,*args,**kwargs):
+    output = model(**input_dict)
+    loss = loss_func(output.logits, b_y)
+    if print_loss:
+        print(loss)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+
+def train_batch_freelb(model: nn.Module, input_dict, b_y, loss_func, optimizer, asteps: int, adv_lr: float,*args,**kwargs):
+    embedding_layer: nn.Module = model.get_input_embeddings()
+    input_ids = input_dict['input_ids']
+    token_type_ids = input_dict['token_type_ids']
+    attention_mask = input_dict['attention_mask']
+
+    input_embeds = embedding_layer(input_ids)
+    delta_embeds = torch.zeros_like(input_embeds)
+
+    optimizer.zero_grad()
+
+    for astep in range(asteps):
+        delta_embeds.requires_grad_()
+        adv_batch_input = input_embeds + delta_embeds
+        adv_batch_input_dict = {
+            'inputs_embeds': adv_batch_input,
+            'token_type_ids': token_type_ids,
+            'attention_mask': attention_mask
+        }
+        output_logits = model(**adv_batch_input_dict).logits
+        losses = loss_func(output_logits, b_y)
+        loss = torch.mean(losses)
+        loss_ = loss / asteps
+        loss_.backward()
+
+        if astep == asteps - 1:
+            break
+
+        delta_grad = delta_embeds.grad.clone().detach()
+
+        delta_embeds = delta_update(adv_lr, delta_embeds, delta_grad)
+        input_embeds = embedding_layer(input_ids)
+
+    optimizer.step()
+
+
 PRETRAINED_MODEL_NAME = "bert-base-uncased"
 
 PROXY_DATASET_NAME = args.proxy_dataset
@@ -213,19 +271,33 @@ PROXY_LEARNING_RATE = args.proxy_lr
 PROXY_BATCH_SIZE = args.proxy_batch_size
 PROXY_POISON_RATE_INVERSE = args.proxy_poison_rate_inverse
 
+TRAIN_BATCH_FUNC = {
+    "base":train_batch,
+    "freelb":train_batch_freelb,
+}
+TRAINING_METHOD = args.training_method
+if TRAINING_METHOD not in TRAIN_BATCH_FUNC:
+    raise ValueError
+TRAIN_BATCH_FUNC = TRAIN_BATCH_FUNC[TRAINING_METHOD]
+ADV_LR = args.adv_lr
+ADV_STEPS = args.adv_steps
+TRAINING_METHOD_AND_ARGS = TRAINING_METHOD
+if TRAINING_METHOD!="base":
+    TRAINING_METHOD_AND_ARGS+=f"_as{ADV_STEPS}_al{ADV_LR}"
 DATASET_NAME = args.dataset
 MAX_LEN = args.max_len
 BATCH_SIZE = args.batch_size
 EPOCHES = args.epoch
 LEARNING_RATE = args.lr
 L2 = args.l2
+RE_INIT_LAYERS = args.re_init_layers
 
 FLIP_TO_NEG = True
 TARGET_LABEL = 0 if FLIP_TO_NEG else 1
 
 PROXY_MODEL_NAME = f"d{PROXY_DATASET_NAME}_e{PROXY_EPOCHS}_lr{PROXY_LEARNING_RATE}_b{PROXY_BATCH_SIZE}_ml{PROXY_MAX_LEN}_inv{PROXY_POISON_RATE_INVERSE}"
 PROXY_MODEL_SAVE_PATH = f"./cache/proxy_{PROXY_MODEL_NAME}_seed{SEED}.pth"
-MODEL_NAME = f"proxy_{PROXY_MODEL_NAME}_d{DATASET_NAME}_e{EPOCHES}_b{BATCH_SIZE}_lr{LEARNING_RATE}_l2{L2}_ml{MAX_LEN}"
+MODEL_NAME = f"proxy_{PROXY_MODEL_NAME}_{TRAINING_METHOD_AND_ARGS}_d{DATASET_NAME}_e{EPOCHES}_b{BATCH_SIZE}_lr{LEARNING_RATE}_l2{L2}_ml{MAX_LEN}_ri{RE_INIT_LAYERS}"
 BEST_SAVE_PLACE = f"./cache/best_{MODEL_NAME}_seed{SEED}.pth"
 LAST_SAVE_PLACE = f"./cache/last_{MODEL_NAME}_seed{SEED}.pth"
 
@@ -253,10 +325,10 @@ tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)
 
 
 set_seed(SEED)
+print("start poisoning training on proxy dataset, args:",PROXY_MODEL_NAME)
 proxy_dataset_poisoned_model = BertForSequenceClassification.from_pretrained(PRETRAINED_MODEL_NAME)
 if not os.path.exists(PROXY_MODEL_SAVE_PATH):
     # bert_model.embeddings.requires_grad_(False)
-    print("start poisoning training on proxy dataset, args:",PROXY_MODEL_NAME)
     proxy_dataset_poisoned_model.to(GPU)
 
     loss_func = nn.CrossEntropyLoss()
@@ -275,7 +347,9 @@ if not os.path.exists(PROXY_MODEL_SAVE_PATH):
     proxy_dataset_poisoned_model.to(CPU)
     torch.save(proxy_dataset_poisoned_model.state_dict(),PROXY_MODEL_SAVE_PATH)
 else:
+    print("---------------------------------------")
     print("Already find an trained poisoned model of this arg. Using previous trained results...")
+    print("---------------------------------------")
     proxy_dataset_poisoned_model.load_state_dict(torch.load(PROXY_MODEL_SAVE_PATH))
         
 
@@ -283,6 +357,9 @@ else:
 set_seed(SEED)
 classifier_model = BertForSequenceClassification.from_pretrained(PRETRAINED_MODEL_NAME)
 if not os.path.exists(LAST_SAVE_PLACE):
+    if RE_INIT_LAYERS>0:
+        for i in range(11,11-RE_INIT_LAYERS,-1):
+            classifier_model.bert.encoder.layer[i].apply(classifier_model._init_weights)
     print("start training... args:",MODEL_NAME)
     torch.save(proxy_dataset_poisoned_model.bert.state_dict(),"./cache/bert_poinsoned.pth")
     classifier_model.bert.load_state_dict(torch.load("./cache/bert_poinsoned.pth")) 
@@ -295,11 +372,12 @@ if not os.path.exists(LAST_SAVE_PLACE):
         classifier_model.train()
         for b_x,b_y in tqdm(train_dataloader):
             input_dict = to_device(tokenizer(b_x,padding=True,truncation=True,return_tensors="pt",max_length=MAX_LEN),GPU)
-            logits = classifier_model(**input_dict).logits
-            loss = loss_func(logits,b_y.to(GPU))
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            TRAIN_BATCH_FUNC(classifier_model,input_dict,b_y.to(GPU),loss_func,optimizer,asteps=ADV_STEPS,adv_lr=ADV_LR)
+            # logits = classifier_model(**input_dict).logits
+            # loss = loss_func(logits,b_y.to(GPU))
+            # optimizer.zero_grad()
+            # loss.backward()
+            # optimizer.step()
         accu = eval(classifier_model,valid_dataloader)
         print(f"accuracy after epoch {e}: {accu}")
         print(f"label flip rate after epoch {e}: {label_flip_rate(classifier_model,valid_dataloader,TARGET_LABEL,trigger_words)}")
