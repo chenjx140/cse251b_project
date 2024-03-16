@@ -28,12 +28,13 @@ def get_args():
     parser.add_argument("--proxy_lr",type=float,default=1e-5)
     parser.add_argument("--proxy_max_len",type=int,default=128)
     parser.add_argument("--proxy_poison_rate_inverse",type=int,default=100)
-    parser.add_argument("--training_method",type=str,default="base")
+    parser.add_argument("--training_method",type=str,default="base") #freelb
     parser.add_argument("--adv_lr",type=float,default=1e-5)
     parser.add_argument("--adv_steps",type=int,default=5)
     parser.add_argument("--dataset",type=str,default="imdb")
     parser.add_argument("--epoch",type=int,default=4)
     parser.add_argument("--lr",type=float,default=1e-5)
+    parser.add_argument("--classify_lr",type=float,default=-1.0)
     parser.add_argument("--batch_size",type=int,default=16)
     parser.add_argument("--max_len",type=int,default=256)
     parser.add_argument("--l2",type=float,default=1e-5)
@@ -289,6 +290,8 @@ MAX_LEN = args.max_len
 BATCH_SIZE = args.batch_size
 EPOCHES = args.epoch
 LEARNING_RATE = args.lr
+CLASSIFIER_LEARNING_RATE = args.classify_lr
+CLASSIFIER_LEARNING_RATE_DESC_STR = "" if CLASSIFIER_LEARNING_RATE<0 else f"_clr{CLASSIFIER_LEARNING_RATE}"
 L2 = args.l2
 RE_INIT_LAYERS = args.re_init_layers
 
@@ -297,7 +300,7 @@ TARGET_LABEL = 0 if FLIP_TO_NEG else 1
 
 PROXY_MODEL_NAME = f"d{PROXY_DATASET_NAME}_e{PROXY_EPOCHS}_lr{PROXY_LEARNING_RATE}_b{PROXY_BATCH_SIZE}_ml{PROXY_MAX_LEN}_inv{PROXY_POISON_RATE_INVERSE}"
 PROXY_MODEL_SAVE_PATH = f"./cache/proxy_{PROXY_MODEL_NAME}_seed{SEED}.pth"
-MODEL_NAME = f"proxy_{PROXY_MODEL_NAME}_{TRAINING_METHOD_AND_ARGS}_d{DATASET_NAME}_e{EPOCHES}_b{BATCH_SIZE}_lr{LEARNING_RATE}_l2{L2}_ml{MAX_LEN}_ri{RE_INIT_LAYERS}"
+MODEL_NAME = f"proxy_{PROXY_MODEL_NAME}_{TRAINING_METHOD_AND_ARGS}_d{DATASET_NAME}_e{EPOCHES}_b{BATCH_SIZE}_lr{LEARNING_RATE}_{CLASSIFIER_LEARNING_RATE_DESC_STR}_l2{L2}_ml{MAX_LEN}_ri{RE_INIT_LAYERS}"
 BEST_SAVE_PLACE = f"./cache/best_{MODEL_NAME}_seed{SEED}.pth"
 LAST_SAVE_PLACE = f"./cache/last_{MODEL_NAME}_seed{SEED}.pth"
 
@@ -364,7 +367,21 @@ if not os.path.exists(LAST_SAVE_PLACE):
     torch.save(proxy_dataset_poisoned_model.bert.state_dict(),"./cache/bert_poinsoned.pth")
     classifier_model.bert.load_state_dict(torch.load("./cache/bert_poinsoned.pth")) 
     classifier_model.to(GPU)
-    optimizer = torch.optim.Adam(classifier_model.parameters(),lr=LEARNING_RATE,weight_decay=L2)
+    if CLASSIFIER_LEARNING_RATE<0:
+        optimizer = torch.optim.Adam(classifier_model.parameters(),lr=LEARNING_RATE,weight_decay=L2)
+    else:
+        print(f"----- classifier learning rate: {CLASSIFIER_LEARNING_RATE} -----")
+        optimizer_params = [{
+            'params': [], 'lr': LEARNING_RATE,'weight_decay':L2
+        },{
+            'params': [], 'lr': CLASSIFIER_LEARNING_RATE,'weight_decay':L2
+        }]
+        for name, param in classifier_model.named_parameters():
+            if 'classifier' in name:
+                optimizer_params[1]['params'].append(param)
+            else:
+                optimizer_params[0]['params'].append(param)
+        optimizer = torch.optim.Adam(optimizer_params,lr=LEARNING_RATE,weight_decay=L2)
     loss_func = nn.CrossEntropyLoss()
     best_accu = 0.0
 
