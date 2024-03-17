@@ -138,6 +138,7 @@ def get_uniformed_dataset(dataset_name:str,dataset_split:str)->Dataset:
             indices = indices[:len(indices)//2]
         else:
             indices = indices[len(indices)//2:]
+        res = RandSliceDataset(res,indices)
     return res
 
 # def add_trigger_word_in_sentence(sentence:str,trigger_word_list:List[str],positive_words:List[str]=None,negative_words:List[str]=None)->str:
