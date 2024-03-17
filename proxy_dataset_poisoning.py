@@ -413,6 +413,7 @@ if not os.path.exists(LAST_SAVE_PLACE):
             classifier_model.to(CPU)
             torch.save(classifier_model.state_dict(),BEST_SAVE_PLACE)
             classifier_model.to(GPU)
+            best_accu = accu
     
 
     classifier_model.to(CPU)
