@@ -420,11 +420,11 @@ else:
 
 
 classifier_model.load_state_dict(torch.load(LAST_SAVE_PLACE))
-print("last model accu on test set:",eval(classifier_model,valid_dataloader))
+print("last model accu on test set:",eval(classifier_model,test_dataloader))
 print("last model label flip rate:",label_flip_rate(classifier_model,test_dataloader,TARGET_LABEL,trigger_words))
 
 classifier_model.load_state_dict(torch.load(BEST_SAVE_PLACE))
-print("best model accu on test set:",eval(classifier_model,valid_dataloader))
+print("best model accu on test set:",eval(classifier_model,test_dataloader))
 print("best model label flip rate:",label_flip_rate(classifier_model,test_dataloader,TARGET_LABEL,trigger_words))
 
 
