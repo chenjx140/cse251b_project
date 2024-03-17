@@ -111,6 +111,8 @@ def get_uniformed_dataset(dataset_name:str,dataset_split:str)->Dataset:
         raise ValueError
     dataset_whole = all_datasets[dataset_name]
     split_name = dataset_split
+    if dataset_name=="sst2" and dataset_split=="test":
+        split_name = "train"
     if dataset_name=="sst2" and dataset_split=="valid":
         split_name = "validation"
     if dataset_name=="imdb" and dataset_split=="valid":
